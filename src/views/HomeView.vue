@@ -12,7 +12,7 @@
 </template>
 
 <script>
-import fft from 'fft-js';
+import { fft } from 'fft-js';
 
 export default {
   data() {
@@ -21,11 +21,43 @@ export default {
       analyser: null,
       microphone: null,
       javascriptNode: null,
-      audioData: [],
-      results: null
+      audioData: [],  // Для хранения всех аудиоданных с микрофона
+      results: null,  // Для отображения результата сравнения в реальном времени
+      referenceAudioData: null,  // Для хранения данных эталонного аудио
+      intervalId: null,  // Интервал для проверки в реальном времени
+      segmentLength: 256, // Длина эталонного аудио для сравнения
     };
   },
+  mounted() {
+    this.loadReferenceAudio();
+  },
   methods: {
+    async loadReferenceAudio() {
+      const response = await fetch('/res/alphabet/а/voice.wav');
+
+      const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+
+      const arrayBuffer = await response.arrayBuffer();
+      const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+
+      const offlineContext = new OfflineAudioContext(1, audioBuffer.length, audioBuffer.sampleRate);
+      const source = offlineContext.createBufferSource();
+      source.buffer = audioBuffer;
+
+      const analyser = offlineContext.createAnalyser();
+      analyser.fftSize = 256;
+      source.connect(analyser);
+      source.start();
+
+      await offlineContext.startRendering();
+
+      const bufferLength = analyser.frequencyBinCount;
+      const dataArray = new Uint8Array(bufferLength);
+      analyser.getByteFrequencyData(dataArray);
+
+      this.referenceAudioData = dataArray;
+      this.segmentLength = dataArray.length;  // Устанавливаем длину эталона
+    },
     async startListening() {
       if (!this.audioContext) {
         this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
@@ -41,9 +73,19 @@ export default {
       this.analyser.connect(this.javascriptNode);
       this.javascriptNode.connect(this.audioContext.destination);
 
+      // Очищаем предыдущие данные
+      this.audioData = [];
+
+      // Устанавливаем обработчик данных с микрофона
       this.javascriptNode.onaudioprocess = () => {
+        this.captureAudio();
         this.visualize();
       };
+
+      // Запускаем периодическое сравнение в реальном времени
+      this.intervalId = setInterval(() => {
+        this.analyseAudioRealTime();
+      }, 500);  // Каждые 500 мс
     },
     stopListening() {
       if (this.javascriptNode) {
@@ -52,8 +94,34 @@ export default {
         if (this.microphone) {
           this.microphone.disconnect();
         }
-        this.analyseAudio();
+        clearInterval(this.intervalId);  // Останавливаем интервал сравнения
       }
+    },
+    captureAudio() {
+      const bufferLength = this.analyser.frequencyBinCount;
+      const dataArray = new Uint8Array(bufferLength);
+      this.analyser.getByteTimeDomainData(dataArray);
+      this.audioData.push(...dataArray);  // Записываем аудиоданные
+    },
+    analyseAudioRealTime() {
+      const audioDataLength = this.audioData.length;
+      if (audioDataLength < this.segmentLength) {
+        return;  // Ждем, пока не наберем данных на один сегмент для сравнения
+      }
+
+      // Извлекаем последние данные длиной с эталон
+      const recentSegment = this.audioData.slice(audioDataLength - this.segmentLength, audioDataLength);
+
+      const recordedFFT = fft(recentSegment);
+      const referenceFFT = fft(this.referenceAudioData);
+
+      let similarity = 0;
+      for (let i = 0; i < recordedFFT.length; i++) {
+        similarity += Math.abs(recordedFFT[i][0] - referenceFFT[i][0]);
+      }
+
+      // Чем меньше разница, тем больше схожесть
+      this.results = similarity < 1000 ? 'Похоже' : similarity;
     },
     visualize() {
       const canvas = this.$refs.canvas;
@@ -62,14 +130,14 @@ export default {
       const dataArray = new Uint8Array(bufferLength);
 
       this.analyser.getByteTimeDomainData(dataArray);
-      this.audioData = dataArray;
 
       canvasContext.clearRect(0, 0, canvas.width, canvas.height);
+
       canvasContext.lineWidth = 2;
       canvasContext.strokeStyle = 'rgb(0, 0, 0)';
       canvasContext.beginPath();
 
-      const sliceWidth = (canvas.width * 1.0) / bufferLength;
+      const sliceWidth = canvas.width / bufferLength;
       let x = 0;
 
       for (let i = 0; i < bufferLength; i++) {
@@ -88,9 +156,6 @@ export default {
       canvasContext.lineTo(canvas.width, canvas.height / 2);
       canvasContext.stroke();
     },
-    analyseAudio() {
-      return;
-    }
   }
 };
 </script>
@@ -134,4 +199,3 @@ button:active {
   transform: translateY(-2px);
 }
 </style>
-
